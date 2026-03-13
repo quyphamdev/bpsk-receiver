@@ -234,11 +234,13 @@ begin
                 locked_r   <= '0';
                 lock_cnt   <= 0;
             elsif rot_valid = '1' then
-                -- Phase detector: error = I * sign(Q)
-                if rot_q >= 0 then
-                    error := rot_i;
+                -- Phase detector (BPSK Costas): error = Q * sign(I)
+                -- Correct formula: zero at lock (Q=0, I≠0), proportional to sin(phase_error).
+                -- The original I*sign(Q) was a bang-bang detector locked to phi=pi/2, not phi=0.
+                if rot_i >= 0 then
+                    error := rot_q;
                 else
-                    error := -rot_i;
+                    error := -rot_q;
                 end if;
 
                 -- Loop filter: PI

@@ -62,23 +62,26 @@ architecture sim of tb_bpsk_receiver is
             LUT_DEPTH            : positive
         );
         port (
-            clk         : in  std_logic;
-            rst         : in  std_logic;
-            s_valid     : in  std_logic;
-            s_ready     : out std_logic;
-            s_i_data    : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
-            s_q_data    : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
-            data_valid  : out std_logic;
-            rx_bit      : out std_logic;
-            locked      : out std_logic;
-            dbg_mf_valid  : out std_logic;
-            dbg_mf_i      : out signed(DATA_WIDTH - 1 downto 0);
-            dbg_mf_q      : out signed(DATA_WIDTH - 1 downto 0);
-            dbg_fft_valid : out std_logic;
-            dbg_peak_bin  : out unsigned(LOG2_FFT - 1 downto 0);
-            dbg_freq_est  : out signed(LOG2_FFT + 8 downto 0);
-            dbg_costas_i  : out signed(DATA_WIDTH - 1 downto 0);
-            dbg_costas_q  : out signed(DATA_WIDTH - 1 downto 0)
+            clk            : in  std_logic;
+            rst            : in  std_logic;
+            s_valid        : in  std_logic;
+            s_ready        : out std_logic;
+            s_i_data       : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
+            s_q_data       : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
+            data_valid     : out std_logic;
+            rx_bit         : out std_logic;
+            locked         : out std_logic;
+            dbg_mf_valid   : out std_logic;
+            dbg_mf_i       : out signed(DATA_WIDTH - 1 downto 0);
+            dbg_mf_q       : out signed(DATA_WIDTH - 1 downto 0);
+            dbg_fft_valid  : out std_logic;
+            dbg_peak_bin   : out unsigned(LOG2_FFT - 1 downto 0);
+            dbg_freq_est   : out signed(LOG2_FFT + 8 downto 0);
+            dbg_costas_i   : out signed(DATA_WIDTH - 1 downto 0);
+            dbg_costas_q   : out signed(DATA_WIDTH - 1 downto 0);
+            dbg_desp_valid : out std_logic;
+            dbg_desp_i     : out signed(DATA_WIDTH - 1 downto 0);
+            dbg_desp_q     : out signed(DATA_WIDTH - 1 downto 0)
         );
     end component;
 
@@ -102,14 +105,18 @@ architecture sim of tb_bpsk_receiver is
     signal rx_bit     : std_logic;
     signal locked     : std_logic;
 
-    signal dbg_mf_valid  : std_logic;
-    signal dbg_mf_i      : signed(DATA_WIDTH - 1 downto 0);
-    signal dbg_mf_q      : signed(DATA_WIDTH - 1 downto 0);
-    signal dbg_fft_valid : std_logic;
-    signal dbg_peak_bin  : unsigned(LOG2_FFT - 1 downto 0);
-    signal dbg_freq_est  : signed(LOG2_FFT + 8 downto 0);
-    signal dbg_costas_i  : signed(DATA_WIDTH - 1 downto 0);
-    signal dbg_costas_q  : signed(DATA_WIDTH - 1 downto 0);
+    signal dbg_mf_valid   : std_logic;
+    signal dbg_mf_i       : signed(DATA_WIDTH - 1 downto 0);
+    signal dbg_mf_q       : signed(DATA_WIDTH - 1 downto 0);
+    signal dbg_fft_valid  : std_logic;
+    signal dbg_peak_bin   : unsigned(LOG2_FFT - 1 downto 0);
+    signal dbg_freq_est   : signed(LOG2_FFT + 8 downto 0);
+    signal dbg_costas_i   : signed(DATA_WIDTH - 1 downto 0);
+    signal dbg_costas_q   : signed(DATA_WIDTH - 1 downto 0);
+    -- Despreader output: observe PN correlation peak in Vivado waveform viewer
+    signal dbg_desp_valid : std_logic;
+    signal dbg_desp_i     : signed(DATA_WIDTH - 1 downto 0);
+    signal dbg_desp_q     : signed(DATA_WIDTH - 1 downto 0);
 
     -- =========================================================================
     -- Simulation helpers
@@ -193,23 +200,26 @@ begin
             LUT_DEPTH          => 256
         )
         port map (
-            clk           => clk,
-            rst           => rst,
-            s_valid       => s_valid,
-            s_ready       => s_ready,
-            s_i_data      => s_i_data,
-            s_q_data      => s_q_data,
-            data_valid    => data_valid,
-            rx_bit        => rx_bit,
-            locked        => locked,
-            dbg_mf_valid  => dbg_mf_valid,
-            dbg_mf_i      => dbg_mf_i,
-            dbg_mf_q      => dbg_mf_q,
-            dbg_fft_valid => dbg_fft_valid,
-            dbg_peak_bin  => dbg_peak_bin,
-            dbg_freq_est  => dbg_freq_est,
-            dbg_costas_i  => dbg_costas_i,
-            dbg_costas_q  => dbg_costas_q
+            clk            => clk,
+            rst            => rst,
+            s_valid        => s_valid,
+            s_ready        => s_ready,
+            s_i_data       => s_i_data,
+            s_q_data       => s_q_data,
+            data_valid     => data_valid,
+            rx_bit         => rx_bit,
+            locked         => locked,
+            dbg_mf_valid   => dbg_mf_valid,
+            dbg_mf_i       => dbg_mf_i,
+            dbg_mf_q       => dbg_mf_q,
+            dbg_fft_valid  => dbg_fft_valid,
+            dbg_peak_bin   => dbg_peak_bin,
+            dbg_freq_est   => dbg_freq_est,
+            dbg_costas_i   => dbg_costas_i,
+            dbg_costas_q   => dbg_costas_q,
+            dbg_desp_valid => dbg_desp_valid,
+            dbg_desp_i     => dbg_desp_i,
+            dbg_desp_q     => dbg_desp_q
         );
 
     -- =========================================================================
@@ -349,8 +359,11 @@ begin
         variable checked      : integer := 0;
         variable err_norm     : integer := 0;
         variable err_inv      : integer := 0;
-        -- Acquisition delay allowance: first ACQ_SKIP symbols may be wrong
-        constant ACQ_SKIP     : integer := 4;
+        -- Skip the first ACQ_SKIP symbols to allow the receiver to acquire:
+        --   * FFT fills after FFT_SIZE symbols (coarse frequency correction)
+        --   * Costas loop converges after ~30 more symbols
+        -- 100 symbols is a safe margin for FFT_SIZE <= 64.
+        constant ACQ_SKIP     : integer := 100;
         variable polarity_inv : boolean := false;
         variable expected_bit : std_logic;
     begin
@@ -398,20 +411,50 @@ begin
         -- -----------------------------------------------------------------
         report "=== BPSK Receiver Testbench Results ===" severity note;
         report "  Symbols transmitted : " & integer'image(SIM_SYMBOLS) severity note;
+        report "  Acquisition skip    : " & integer'image(ACQ_SKIP) & " symbols" severity note;
         report "  Symbols checked     : " & integer'image(checked) severity note;
         report "  Bit errors          : " & integer'image(errors) severity note;
+        report "  BER                 : " &
+               integer'image((errors * 1000) / (checked + 1)) & "/1000" severity note;
         report "  SNR (dB)            : " & real'image(SNR_DB) severity note;
         report "  CFO (norm)          : " & real'image(CFO_NORM) severity note;
+        if locked = '1' then
+            report "  Carrier lock        : YES (Costas loop locked)" severity note;
+        else
+            report "  Carrier lock        : NO  (Costas loop not locked)" severity note;
+        end if;
+        if polarity_inv then
+            report "  Phase polarity      : INVERTED (180-deg ambiguity resolved)" severity note;
+        else
+            report "  Phase polarity      : NORMAL" severity note;
+        end if;
 
-        -- BER check: warn if high.  Full end-to-end BER depends on PN phase
-        -- acquisition via the FFT stage; the assert uses severity warning so
-        -- the simulation still terminates cleanly.  Tighten to 'failure' once
-        -- closed-loop PN acquisition is integrated.
+        -- Show first 8 post-acquisition bit comparisons for quick visual check
+        report "  TX bits [ACQ_SKIP..ACQ_SKIP+7]: " &
+               std_logic'image(tx_bits(ACQ_SKIP+0)) &
+               std_logic'image(tx_bits(ACQ_SKIP+1)) &
+               std_logic'image(tx_bits(ACQ_SKIP+2)) &
+               std_logic'image(tx_bits(ACQ_SKIP+3)) &
+               std_logic'image(tx_bits(ACQ_SKIP+4)) &
+               std_logic'image(tx_bits(ACQ_SKIP+5)) &
+               std_logic'image(tx_bits(ACQ_SKIP+6)) &
+               std_logic'image(tx_bits(ACQ_SKIP+7)) severity note;
+        report "  RX bits [ACQ_SKIP..ACQ_SKIP+7]: " &
+               std_logic'image(rx_bits(ACQ_SKIP+0)) &
+               std_logic'image(rx_bits(ACQ_SKIP+1)) &
+               std_logic'image(rx_bits(ACQ_SKIP+2)) &
+               std_logic'image(rx_bits(ACQ_SKIP+3)) &
+               std_logic'image(rx_bits(ACQ_SKIP+4)) &
+               std_logic'image(rx_bits(ACQ_SKIP+5)) &
+               std_logic'image(rx_bits(ACQ_SKIP+6)) &
+               std_logic'image(rx_bits(ACQ_SKIP+7)) severity note;
+
+        -- BER check: require < 10% BER in the post-acquisition window.
         assert errors * 10 < checked
-            report "NOTE: BER is high (" & integer'image(errors) & "/" &
+            report "FAIL: BER is high (" & integer'image(errors) & "/" &
                    integer'image(checked) &
                    " errors) - PN acquisition may not have locked"
-            severity warning;
+            severity failure;
 
         -- Verify that the DUT produced output (data_valid pulsed at least once)
         assert rx_count > 0
@@ -426,6 +469,35 @@ begin
         finish;
         wait;
     end process proc_check;
+
+    -- =========================================================================
+    -- Debug monitor: print FFT/FreqEst events and lock events during simulation
+    -- =========================================================================
+    proc_debug : process is
+        variable fft_count : integer := 0;
+    begin
+        wait until rst = '0';
+        loop
+            -- Report each FFT acquisition result
+            wait until rising_edge(clk) and dbg_fft_valid = '1';
+            fft_count := fft_count + 1;
+            report "FFT#" & integer'image(fft_count) &
+                   "  peak_bin=" & integer'image(to_integer(dbg_peak_bin)) &
+                   "  freq_est=" & integer'image(to_integer(dbg_freq_est)) &
+                   "  rx_count=" & integer'image(rx_count)
+                   severity note;
+        end loop;
+    end process proc_debug;
+
+    proc_debug_lock : process is
+    begin
+        wait until rst = '0';
+        -- Report when Costas loop locks for the first time
+        wait until locked = '1';
+        report "Costas loop LOCKED at rx_count=" & integer'image(rx_count)
+               severity note;
+        wait;
+    end process proc_debug_lock;
 
     -- =========================================================================
     -- Timeout watchdog
