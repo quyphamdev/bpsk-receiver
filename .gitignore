@@ -1,0 +1,6 @@
+# Vivado generated project directory (created by scripts/create_vivado_project.tcl)
+vivado_project/
+
+# Vivado log / journal files that may appear in the repo root
+vivado*.log
+vivado*.jou
