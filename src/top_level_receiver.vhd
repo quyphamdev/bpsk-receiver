@@ -63,14 +63,18 @@ entity top_level_receiver is
         -- =====================================================================
         -- Debug / monitor ports
         -- =====================================================================
-        dbg_mf_valid  : out std_logic;
-        dbg_mf_i      : out signed(DATA_WIDTH - 1 downto 0);
-        dbg_mf_q      : out signed(DATA_WIDTH - 1 downto 0);
-        dbg_fft_valid : out std_logic;
-        dbg_peak_bin  : out unsigned(LOG2_FFT - 1 downto 0);
-        dbg_freq_est  : out signed(LOG2_FFT + 8 downto 0);  -- 8 frac bits
-        dbg_costas_i  : out signed(DATA_WIDTH - 1 downto 0);
-        dbg_costas_q  : out signed(DATA_WIDTH - 1 downto 0)
+        dbg_mf_valid   : out std_logic;
+        dbg_mf_i       : out signed(DATA_WIDTH - 1 downto 0);
+        dbg_mf_q       : out signed(DATA_WIDTH - 1 downto 0);
+        dbg_fft_valid  : out std_logic;
+        dbg_peak_bin   : out unsigned(LOG2_FFT - 1 downto 0);
+        dbg_freq_est   : out signed(LOG2_FFT + 8 downto 0);  -- 8 frac bits
+        dbg_costas_i   : out signed(DATA_WIDTH - 1 downto 0);
+        dbg_costas_q   : out signed(DATA_WIDTH - 1 downto 0);
+        -- Despreader output: PN correlation peak observable in Vivado waveform
+        dbg_desp_valid : out std_logic;
+        dbg_desp_i     : out signed(DATA_WIDTH - 1 downto 0);
+        dbg_desp_q     : out signed(DATA_WIDTH - 1 downto 0)
     );
 end entity top_level_receiver;
 
@@ -289,12 +293,12 @@ architecture rtl of top_level_receiver is
     -- FCW register (latched from freq estimator, held constant until next update)
     signal fcw_reg     : signed(31 downto 0) := (others => '0');
 
-    -- NCO -> Costas loop (at chip rate)
+    -- NCO -> despreader (at chip rate, before Costas)
     signal nco_valid   : std_logic;
     signal nco_i       : signed(DATA_WIDTH - 1 downto 0);
     signal nco_q       : signed(DATA_WIDTH - 1 downto 0);
 
-    -- Costas loop output (at chip rate, carrier-corrected)
+    -- Costas loop output (at symbol rate, after despreader)
     signal cos_valid   : std_logic;
     signal cos_i       : signed(DATA_WIDTH - 1 downto 0);
     signal cos_q       : signed(DATA_WIDTH - 1 downto 0);
@@ -304,6 +308,19 @@ architecture rtl of top_level_receiver is
     signal desp_valid  : std_logic;
     signal desp_i      : signed(DATA_WIDTH - 1 downto 0);
     signal desp_q      : signed(DATA_WIDTH - 1 downto 0);
+
+    -- Complex-squaring stage: (I+jQ)^2 = (I^2-Q^2) + j*2IQ
+    -- Removes BPSK data modulation (d^2=1) so the FFT sees a clean tone at 2*f_CFO.
+    signal sq_valid    : std_logic := '0';
+    signal sq_i        : signed(DATA_WIDTH - 1 downto 0) := (others => '0');
+    signal sq_q        : signed(DATA_WIDTH - 1 downto 0) := (others => '0');
+
+    -- Matched-filter timing alignment:
+    -- The MF's out_valid (driven by valid_d1) fires one clock before out_i/out_q
+    -- contain the correct accumulated result for the current chip.  A 1-cycle
+    -- delay register aligns the valid strobe with the data before the NCO sees it,
+    -- preventing a systematic PN misalignment (+1 chip offset) in the despreader.
+    signal mf_valid_aligned : std_logic := '0';
 
 begin
 
@@ -336,11 +353,18 @@ begin
             DATA_WIDTH  => DATA_WIDTH,
             COEFF_WIDTH => 16,
             NUM_TAPS    => NUM_TAPS,
-            COEFF_0  => 0,     COEFF_1  => -160,  COEFF_2  => -213,
-            COEFF_3  => 256,   COEFF_4  => 1108,  COEFF_5  => 2030,
-            COEFF_6  => 2561,  COEFF_7  => 2561,  COEFF_8  => 2030,
-            COEFF_9  => 1108,  COEFF_10 => 256,   COEFF_11 => -213,
-            COEFF_12 => -160,  COEFF_13 => 0,     COEFF_14 => 0,
+            -- Single-tap pass-through for 1-sample-per-chip operation.
+            -- The RRC coefficients (COEFF_0=0 at the main lag) cause the PN
+            -- autocorrelation sum to use only the -1/31 side-lobes, collapsing
+            -- the despreader output to ~44 LSB -- too small for the squaring
+            -- stage.  A single tap at tap-0 (COEFF_0=32767) preserves the full
+            -- chip amplitude while the MAC timing fix ensures chip[k] maps to
+            -- tap-0 at the correct clock cycle.
+            COEFF_0  => 32767, COEFF_1  => 0,     COEFF_2  => 0,
+            COEFF_3  => 0,     COEFF_4  => 0,     COEFF_5  => 0,
+            COEFF_6  => 0,     COEFF_7  => 0,     COEFF_8  => 0,
+            COEFF_9  => 0,     COEFF_10 => 0,     COEFF_11 => 0,
+            COEFF_12 => 0,     COEFF_13 => 0,     COEFF_14 => 0,
             COEFF_15 => 0
         )
         port map (
@@ -354,7 +378,21 @@ begin
             out_q     => mf_q
         );
 
-    -- =========================================================================
+    -- Delay mf_valid by one cycle so it coincides with the correct out_i/out_q data.
+    -- (The MF's valid_d1 fires one cycle before proc_out has latched the current
+    -- chip's MAC result; the extra register stage removes that skew and prevents
+    -- a +1 chip PN misalignment in the despreader.)
+    proc_mf_align : process(clk) is
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                mf_valid_aligned <= '0';
+            else
+                mf_valid_aligned <= mf_valid;
+            end if;
+        end if;
+    end process proc_mf_align;
+
     -- =========================================================================
     -- PN Generator:
     --   chip_en is driven by NCO corrector output valid (chip rate).
@@ -369,7 +407,7 @@ begin
         port map (
             clk       => clk,
             rst       => rst,
-            chip_en   => cos_valid,  -- advance PN at Costas output (chip) rate
+            chip_en   => nco_valid,  -- advance PN at NCO output (chip) rate
             load      => '0',
             seed      => (others => '0'),
             pn_chip   => pn_chip,
@@ -378,9 +416,13 @@ begin
 
     -- =========================================================================
     -- Despreader:
-    --   Input: Costas loop output (carrier-corrected, chip-rate samples).
+    --   Input: NCO-corrected chip-rate samples (carrier frequency corrected).
     --   Integrates over PN_LENGTH chips and outputs one despread symbol.
     --   Output is at symbol rate = chip_rate / PN_LENGTH.
+    --
+    --   The Costas loop now operates AFTER the despreader (at symbol rate),
+    --   so the despreader uses the raw NCO output.  This decouples coarse
+    --   frequency correction (FFT/NCO) from fine phase tracking (Costas).
     -- =========================================================================
     u_desp : despreader
         generic map (
@@ -390,9 +432,9 @@ begin
         port map (
             clk          => clk,
             rst          => rst,
-            in_valid     => cos_valid,   -- carrier-corrected chip-rate input
-            in_i         => cos_i,
-            in_q         => cos_q,
+            in_valid     => nco_valid,   -- NCO-corrected chip-rate input
+            in_i         => nco_i,
+            in_q         => nco_q,
             pn_signed    => pn_signed,
             symbol_valid => desp_valid,
             symbol_i     => desp_i,
@@ -400,9 +442,50 @@ begin
         );
 
     -- =========================================================================
+    -- Complex Squaring Stage:
+    --   Input: despread BPSK symbols d_m * e^(j*phi_m).
+    --   Output: squared symbols e^(j*2*phi_m).
+    --
+    --   Squaring removes the BPSK data modulation (d_m^2 = 1), leaving a pure
+    --   complex exponential at twice the residual carrier frequency offset.
+    --   Without this, the FFT sees random-polarity phasors and cannot detect
+    --   the carrier frequency offset peak (E[d_m]=0 → E[FFT output]=0).
+    --
+    --   (I + jQ)^2 = (I^2 - Q^2) + j * 2*I*Q
+    --   Scaled by 2^(-DATA_WIDTH) to keep result within DATA_WIDTH bits.
+    -- =========================================================================
+    proc_square : process(clk) is
+        variable prod_ii : signed(2 * DATA_WIDTH - 1 downto 0);
+        variable prod_qq : signed(2 * DATA_WIDTH - 1 downto 0);
+        variable prod_iq : signed(2 * DATA_WIDTH - 1 downto 0);
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                sq_valid <= '0';
+                sq_i     <= (others => '0');
+                sq_q     <= (others => '0');
+            else
+                sq_valid <= desp_valid;
+                if desp_valid = '1' then
+                    prod_ii := desp_i * desp_i;
+                    prod_qq := desp_q * desp_q;
+                    prod_iq := desp_i * desp_q;
+                    -- Scale down by 2^DATA_WIDTH to keep within DATA_WIDTH bits.
+                    -- Real part: (I^2 - Q^2) / 2^DATA_WIDTH
+                    sq_i <= resize(shift_right(prod_ii - prod_qq, DATA_WIDTH),
+                                   DATA_WIDTH);
+                    -- Imag part: 2*I*Q / 2^DATA_WIDTH = I*Q / 2^(DATA_WIDTH-1)
+                    sq_q <= resize(shift_right(prod_iq, DATA_WIDTH - 1),
+                                   DATA_WIDTH);
+                end if;
+            end if;
+        end if;
+    end process proc_square;
+
+    -- =========================================================================
     -- FFT Acquisition:
-    --   Input: despread symbols at symbol rate.
-    --   Computes FFT over FFT_SIZE symbols to estimate residual frequency offset.
+    --   Input: SQUARED despread symbols (data modulation removed).
+    --   Computes FFT over FFT_SIZE symbols; peak bin indicates 2*f_CFO.
     -- =========================================================================
     u_fft : fft_acquisition
         generic map (
@@ -413,9 +496,9 @@ begin
         port map (
             clk       => clk,
             rst       => rst,
-            in_valid  => desp_valid,
-            in_i      => desp_i,
-            in_q      => desp_q,
+            in_valid  => sq_valid,   -- squared despread symbols (data removed)
+            in_i      => sq_i,
+            in_q      => sq_q,
             out_valid => fft_valid,
             peak_bin  => fft_peak,
             mag_peak  => fft_mag_pk,
@@ -447,18 +530,39 @@ begin
         );
 
     -- Latch FCW when frequency estimator produces a new estimate.
-    -- freq_est is in units of (FFT_bins × 2^FRAC_BITS).
-    -- Convert to 32-bit NCO FCW:
-    --   FCW = freq_est × 2^(32 - LOG2_FFT - FRAC_BITS)
-    --       = freq_est << (32 - LOG2_FFT - 8)
-    -- Resize to 32 bits FIRST so shift_left does not lose bits.
+    -- freq_est is peak_bin * 2^FRAC_BITS (FRAC_BITS=8), where peak_bin is the
+    -- FFT bin of the SQUARED despread signal tone (at 2*f_CFO in the symbol domain).
+    --
+    -- Converting to NCO FCW (chip-rate accumulator, 32-bit full circle):
+    --   f_tone   = peak_bin * symbol_rate / FFT_SIZE
+    --            = peak_bin * chip_rate / (PN_LENGTH * FFT_SIZE)
+    --   f_CFO    = f_tone / 2          (squaring doubled the frequency)
+    --   FCW      = f_CFO / chip_rate * 2^32
+    --            = peak_bin / (2 * PN_LENGTH * FFT_SIZE) * 2^32
+    --            = freq_est * 2^(32 - FRAC_BITS - LOG2_FFT - 1 - log2(PN_LENGTH))
+    --
+    -- With FRAC_BITS=8, log2(PN_LENGTH=31) ≈ 5 (using 2^5=32 approximation):
+    --   FCW = freq_est * 2^(32-8-LOG2_FFT-1-5) = freq_est * 2^(18-LOG2_FFT)
+    --
+    -- Negative-frequency handling: if peak_bin > FFT_SIZE/2 the true frequency
+    -- is negative.  Bit (LOG2_FFT+7) of freq_est is '1' exactly when this occurs.
+    -- Correct by subtracting FFT_SIZE * 2^FRAC_BITS = FFT_SIZE * 256.
     proc_fcw : process(clk) is
+        variable freq_adj : signed(31 downto 0);
     begin
         if rising_edge(clk) then
             if rst = '1' then
                 fcw_reg <= (others => '0');
             elsif fest_valid = '1' then
-                fcw_reg <= shift_left(resize(freq_est, 32), 32 - LOG2_FFT - 8);
+                -- Wrap upper-half bins to negative frequency
+                if freq_est(LOG2_FFT + 7) = '1' then
+                    freq_adj := resize(freq_est, 32) -
+                                to_signed(FFT_SIZE * 256, 32);
+                else
+                    freq_adj := resize(freq_est, 32);
+                end if;
+                -- Scale to 32-bit NCO FCW.  LOG2_FFT must be <= 18.
+                fcw_reg <= shift_left(freq_adj, 18 - LOG2_FFT);
             end if;
         end if;
     end process proc_fcw;
@@ -478,7 +582,7 @@ begin
             clk       => clk,
             rst       => rst,
             fcw       => fcw_reg,
-            in_valid  => mf_valid,
+            in_valid  => mf_valid_aligned,
             in_i      => mf_i,
             in_q      => mf_q,
             out_valid => nco_valid,
@@ -488,27 +592,36 @@ begin
 
     -- =========================================================================
     -- Costas Loop:
-    --   Fine carrier phase/frequency tracking at chip rate.
-    --   Input: NCO-corrected samples.
-    --   Output: phase-corrected chip-rate samples.
+    --   Fine carrier phase tracking at SYMBOL rate (after despreader).
+    --   Moving the Costas to symbol rate gives 31× higher SNR per sample and
+    --   fixes the gain-scaling problem: with PHASE_WIDTH=16 and GS=7 the
+    --   effective loop gain K_eff = KP*A*2π/(2^GS * 2^16) ≈ 0.38 < 1
+    --   (stable, ~3-symbol time constant).
+    --
+    --   Input:  despread symbols (symbol rate = chip_rate / PN_LENGTH).
+    --   Output: phase-corrected symbols → BPSK symbol detector.
+    --
+    --   The despreader output BEFORE the Costas is also fed directly to the
+    --   squaring/FFT pipeline for coarse frequency estimation, so the two
+    --   loops (FFT/NCO coarse + Costas fine) are independent.
     -- =========================================================================
     u_costas : carrier_recovery_costas
         generic map (
             DATA_WIDTH  => DATA_WIDTH,
-            PHASE_WIDTH => 24,
+            PHASE_WIDTH => 16,          -- 16-bit phase acc: correct gain scaling
             LUT_DEPTH   => LUT_DEPTH,
             KP          => COSTAS_KP,
             KI          => COSTAS_KI,
             GAIN_SHIFT  => COSTAS_GAIN_SHIFT,
-            LOCK_THRESH => 64,
-            LOCK_COUNT  => 1024
+            LOCK_THRESH => 512,         -- ~7-sigma for symbol-rate SNR ~35 dB
+            LOCK_COUNT  => 100          -- symbols (≈ 3100 chips)
         )
         port map (
             clk       => clk,
             rst       => rst,
-            in_valid  => nco_valid,
-            in_i      => nco_i,
-            in_q      => nco_q,
+            in_valid  => desp_valid,    -- symbol-rate input
+            in_i      => desp_i,
+            in_q      => desp_q,
             out_valid => cos_valid,
             out_i     => cos_i,
             out_q     => cos_q,
@@ -517,9 +630,8 @@ begin
 
     -- =========================================================================
     -- BPSK Symbol Detector:
-    --   Input: despread symbols at symbol rate (from despreader).
-    --   SAMPLES_PER_SYMBOL=1 because the despreader already decimates to
-    --   symbol rate; each despread output is one complete symbol.
+    --   Input: Costas-corrected despread symbols (symbol rate).
+    --   SAMPLES_PER_SYMBOL=1: despreader+Costas already at symbol rate.
     -- =========================================================================
     u_det : bpsk_symbol_detector
         generic map (
@@ -529,9 +641,9 @@ begin
         port map (
             clk        => clk,
             rst        => rst,
-            in_valid   => desp_valid,
-            in_i       => desp_i,
-            in_q       => desp_q,
+            in_valid   => cos_valid,    -- Costas-corrected symbol-rate input
+            in_i       => cos_i,
+            in_q       => cos_q,
             data_valid => data_valid,
             rx_bit     => rx_bit,
             dbg_i      => open
@@ -542,13 +654,16 @@ begin
     -- =========================================================================
     -- Debug outputs
     -- =========================================================================
-    dbg_mf_valid  <= mf_valid;
-    dbg_mf_i      <= mf_i;
-    dbg_mf_q      <= mf_q;
-    dbg_fft_valid <= fft_valid;
-    dbg_peak_bin  <= fft_peak;
-    dbg_freq_est  <= freq_est;
-    dbg_costas_i  <= cos_i;
-    dbg_costas_q  <= cos_q;
+    dbg_mf_valid   <= mf_valid_aligned;
+    dbg_mf_i       <= mf_i;
+    dbg_mf_q       <= mf_q;
+    dbg_fft_valid  <= fft_valid;
+    dbg_peak_bin   <= fft_peak;
+    dbg_freq_est   <= freq_est;
+    dbg_costas_i   <= cos_i;
+    dbg_costas_q   <= cos_q;
+    dbg_desp_valid <= desp_valid;
+    dbg_desp_i     <= desp_i;
+    dbg_desp_q     <= desp_q;
 
 end architecture rtl;

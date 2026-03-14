@@ -123,12 +123,18 @@ begin
                 sr_i(0) <= in_i;
                 sr_q(0) <= in_q;
 
-                -- Multiply-accumulate over all taps
-                mac_i := (others => '0');
-                mac_q := (others => '0');
-                for k in 0 to NUM_TAPS - 1 loop
-                    mac_i := mac_i + resize(sr_i(k) * COEFFS(k), ACC_WIDTH);
-                    mac_q := mac_q + resize(sr_q(k) * COEFFS(k), ACC_WIDTH);
+                -- Multiply-accumulate over all taps.
+                -- Tap 0 uses the NEW input sample (in_i/in_q) directly, because
+                -- the shift-register assignment sr_i(0)<=in_i is scheduled (not
+                -- immediate) in VHDL, so the MAC loop would otherwise see the
+                -- old sr_i(0) from the previous cycle -- creating a systematic
+                -- 1-chip PN misalignment.  Taps 1..N-1 use sr_i(k-1), which is
+                -- the old sr_i value that the shift will move to position k.
+                mac_i := resize(in_i * COEFFS(0), ACC_WIDTH);
+                mac_q := resize(in_q * COEFFS(0), ACC_WIDTH);
+                for k in 1 to NUM_TAPS - 1 loop
+                    mac_i := mac_i + resize(sr_i(k-1) * COEFFS(k), ACC_WIDTH);
+                    mac_q := mac_q + resize(sr_q(k-1) * COEFFS(k), ACC_WIDTH);
                 end loop;
                 acc_i <= mac_i;
                 acc_q <= mac_q;
