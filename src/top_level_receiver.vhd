@@ -293,12 +293,12 @@ architecture rtl of top_level_receiver is
     -- FCW register (latched from freq estimator, held constant until next update)
     signal fcw_reg     : signed(31 downto 0) := (others => '0');
 
-    -- NCO -> Costas loop (at chip rate)
+    -- NCO -> despreader (at chip rate, before Costas)
     signal nco_valid   : std_logic;
     signal nco_i       : signed(DATA_WIDTH - 1 downto 0);
     signal nco_q       : signed(DATA_WIDTH - 1 downto 0);
 
-    -- Costas loop output (at chip rate, carrier-corrected)
+    -- Costas loop output (at symbol rate, after despreader)
     signal cos_valid   : std_logic;
     signal cos_i       : signed(DATA_WIDTH - 1 downto 0);
     signal cos_q       : signed(DATA_WIDTH - 1 downto 0);
@@ -353,11 +353,18 @@ begin
             DATA_WIDTH  => DATA_WIDTH,
             COEFF_WIDTH => 16,
             NUM_TAPS    => NUM_TAPS,
-            COEFF_0  => 0,     COEFF_1  => -160,  COEFF_2  => -213,
-            COEFF_3  => 256,   COEFF_4  => 1108,  COEFF_5  => 2030,
-            COEFF_6  => 2561,  COEFF_7  => 2561,  COEFF_8  => 2030,
-            COEFF_9  => 1108,  COEFF_10 => 256,   COEFF_11 => -213,
-            COEFF_12 => -160,  COEFF_13 => 0,     COEFF_14 => 0,
+            -- Single-tap pass-through for 1-sample-per-chip operation.
+            -- The RRC coefficients (COEFF_0=0 at the main lag) cause the PN
+            -- autocorrelation sum to use only the -1/31 side-lobes, collapsing
+            -- the despreader output to ~44 LSB -- too small for the squaring
+            -- stage.  A single tap at tap-0 (COEFF_0=32767) preserves the full
+            -- chip amplitude while the MAC timing fix ensures chip[k] maps to
+            -- tap-0 at the correct clock cycle.
+            COEFF_0  => 32767, COEFF_1  => 0,     COEFF_2  => 0,
+            COEFF_3  => 0,     COEFF_4  => 0,     COEFF_5  => 0,
+            COEFF_6  => 0,     COEFF_7  => 0,     COEFF_8  => 0,
+            COEFF_9  => 0,     COEFF_10 => 0,     COEFF_11 => 0,
+            COEFF_12 => 0,     COEFF_13 => 0,     COEFF_14 => 0,
             COEFF_15 => 0
         )
         port map (
@@ -387,7 +394,6 @@ begin
     end process proc_mf_align;
 
     -- =========================================================================
-    -- =========================================================================
     -- PN Generator:
     --   chip_en is driven by NCO corrector output valid (chip rate).
     --   The PN advances one chip per NCO output sample.
@@ -401,7 +407,7 @@ begin
         port map (
             clk       => clk,
             rst       => rst,
-            chip_en   => cos_valid,  -- advance PN at Costas output (chip) rate
+            chip_en   => nco_valid,  -- advance PN at NCO output (chip) rate
             load      => '0',
             seed      => (others => '0'),
             pn_chip   => pn_chip,
@@ -410,9 +416,13 @@ begin
 
     -- =========================================================================
     -- Despreader:
-    --   Input: Costas loop output (carrier-corrected, chip-rate samples).
+    --   Input: NCO-corrected chip-rate samples (carrier frequency corrected).
     --   Integrates over PN_LENGTH chips and outputs one despread symbol.
     --   Output is at symbol rate = chip_rate / PN_LENGTH.
+    --
+    --   The Costas loop now operates AFTER the despreader (at symbol rate),
+    --   so the despreader uses the raw NCO output.  This decouples coarse
+    --   frequency correction (FFT/NCO) from fine phase tracking (Costas).
     -- =========================================================================
     u_desp : despreader
         generic map (
@@ -422,9 +432,9 @@ begin
         port map (
             clk          => clk,
             rst          => rst,
-            in_valid     => cos_valid,   -- carrier-corrected chip-rate input
-            in_i         => cos_i,
-            in_q         => cos_q,
+            in_valid     => nco_valid,   -- NCO-corrected chip-rate input
+            in_i         => nco_i,
+            in_q         => nco_q,
             pn_signed    => pn_signed,
             symbol_valid => desp_valid,
             symbol_i     => desp_i,
@@ -582,27 +592,36 @@ begin
 
     -- =========================================================================
     -- Costas Loop:
-    --   Fine carrier phase/frequency tracking at chip rate.
-    --   Input: NCO-corrected samples.
-    --   Output: phase-corrected chip-rate samples.
+    --   Fine carrier phase tracking at SYMBOL rate (after despreader).
+    --   Moving the Costas to symbol rate gives 31× higher SNR per sample and
+    --   fixes the gain-scaling problem: with PHASE_WIDTH=16 and GS=7 the
+    --   effective loop gain K_eff = KP*A*2π/(2^GS * 2^16) ≈ 0.38 < 1
+    --   (stable, ~3-symbol time constant).
+    --
+    --   Input:  despread symbols (symbol rate = chip_rate / PN_LENGTH).
+    --   Output: phase-corrected symbols → BPSK symbol detector.
+    --
+    --   The despreader output BEFORE the Costas is also fed directly to the
+    --   squaring/FFT pipeline for coarse frequency estimation, so the two
+    --   loops (FFT/NCO coarse + Costas fine) are independent.
     -- =========================================================================
     u_costas : carrier_recovery_costas
         generic map (
             DATA_WIDTH  => DATA_WIDTH,
-            PHASE_WIDTH => 32,
+            PHASE_WIDTH => 16,          -- 16-bit phase acc: correct gain scaling
             LUT_DEPTH   => LUT_DEPTH,
             KP          => COSTAS_KP,
             KI          => COSTAS_KI,
             GAIN_SHIFT  => COSTAS_GAIN_SHIFT,
-            LOCK_THRESH => 64,
-            LOCK_COUNT  => 1024
+            LOCK_THRESH => 512,         -- ~7-sigma for symbol-rate SNR ~35 dB
+            LOCK_COUNT  => 100          -- symbols (≈ 3100 chips)
         )
         port map (
             clk       => clk,
             rst       => rst,
-            in_valid  => nco_valid,
-            in_i      => nco_i,
-            in_q      => nco_q,
+            in_valid  => desp_valid,    -- symbol-rate input
+            in_i      => desp_i,
+            in_q      => desp_q,
             out_valid => cos_valid,
             out_i     => cos_i,
             out_q     => cos_q,
@@ -611,9 +630,8 @@ begin
 
     -- =========================================================================
     -- BPSK Symbol Detector:
-    --   Input: despread symbols at symbol rate (from despreader).
-    --   SAMPLES_PER_SYMBOL=1 because the despreader already decimates to
-    --   symbol rate; each despread output is one complete symbol.
+    --   Input: Costas-corrected despread symbols (symbol rate).
+    --   SAMPLES_PER_SYMBOL=1: despreader+Costas already at symbol rate.
     -- =========================================================================
     u_det : bpsk_symbol_detector
         generic map (
@@ -623,9 +641,9 @@ begin
         port map (
             clk        => clk,
             rst        => rst,
-            in_valid   => desp_valid,
-            in_i       => desp_i,
-            in_q       => desp_q,
+            in_valid   => cos_valid,    -- Costas-corrected symbol-rate input
+            in_i       => cos_i,
+            in_q       => cos_q,
             data_valid => data_valid,
             rx_bit     => rx_bit,
             dbg_i      => open

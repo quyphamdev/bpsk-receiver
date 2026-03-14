@@ -195,8 +195,8 @@ begin
             NUM_TAPS           => 16,
             SAMPLES_PER_SYMBOL => SAMPLES_PER_SYMBOL,
             COSTAS_KP          => 128,
-            COSTAS_KI          => 4,
-            COSTAS_GAIN_SHIFT  => 12,
+            COSTAS_KI          => 0,   -- Pure proportional: no integrator overflow at symbol rate
+            COSTAS_GAIN_SHIFT  => 7,   -- K_eff=0.38 with PHASE_WIDTH=16, A≈3968 (symbol rate)
             LUT_DEPTH          => 256
         )
         port map (
